@@ -3,15 +3,26 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::hunter::Hunter;
-use crate::types::{Event, EventKind, Finding, HunterCtx, Mode, Output, Severity};
+use crate::types::{Event, EventKind, Finding, HunterCtx, Mode, Output};
 
-// ── KHV050 — Anonymous access to pod secrets ─────────────────────────────────
+const SA_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
+
+async fn api_get(ctx: &HunterCtx, host: std::net::IpAddr, port: u16, tls: bool, path: &str) -> Option<reqwest::Response> {
+    let scheme = if tls { "https" } else { "http" };
+    let url = format!("{scheme}://{host}:{port}{path}");
+    let mut req = ctx.http_insecure.get(&url);
+    if let Some(tok) = &ctx.sa_token { req = req.bearer_auth(tok); }
+    req.send().await.ok()
+}
+
+// ── KHV050 — Access to all cluster secrets ────────────────────────────────────
 
 pub struct ListAllSecrets;
 
 #[async_trait]
 impl Hunter for ListAllSecrets {
     fn name(&self)          -> &'static str { "ListAllSecrets" }
+    fn description(&self)   -> &'static str { "Lists secrets across all namespaces (anonymously or via the token)." }
     fn mode(&self)          -> Mode         { Mode::Passive }
     fn subscribes_to(&self) -> EventKind    { EventKind::ApiServer }
 
@@ -20,69 +31,89 @@ impl Hunter for ListAllSecrets {
             Event::ApiServer { host, port, tls } => (*host, *port, *tls),
             _ => return vec![],
         };
-
-        let scheme = if tls { "https" } else { "http" };
-        let url = format!("{scheme}://{host}:{port}/api/v1/secrets");
-
-        let resp = match ctx.http_insecure.get(&url).send().await {
-            Ok(r) => r,
-            Err(_) => return vec![],
+        let resp = match api_get(&ctx, host, port, tls, "/api/v1/secrets").await {
+            Some(r) => r,
+            None => return vec![],
         };
-
         if resp.status().is_success() {
             let json: Value = resp.json().await.unwrap_or_default();
             if json["kind"].as_str() == Some("SecretList") {
                 let count = json["items"].as_array().map(|a| a.len()).unwrap_or(0);
                 tracing::warn!("  [!] KHV050 {} secrets accessible at {}:{}", count, host, port);
-                return vec![Output::Finding(Finding {
-                    id:          "KHV050".to_string(),
-                    name:        "Access to Pod's Secrets".to_string(),
-                    description: "Anonymous access to the API server allows listing all \
-                                  cluster secrets, potentially exposing TLS certificates, \
-                                  credentials, and service account tokens.".to_string(),
-                    severity:    Severity::Critical,
-                    host:        host.to_string(),
-                    port:        Some(port),
-                    evidence:    Some(format!("{} secrets listed anonymously", count)),
-                    category:    "vulnerability".to_string(),
-                })];
+                return vec![Output::Finding(Finding::khv(
+                    "KHV050", self.name(), host, Some(port),
+                    Some(format!("{count} secrets listed across all namespaces")),
+                ))];
             }
         }
         vec![]
     }
 }
 
-// ── KHV036 — Service account token readable ───────────────────────────────────
+// ── KHV050 — Per-namespace secret access ──────────────────────────────────────
 
-pub struct ServiceAccountTokenExposed;
+pub struct ListNamespacedSecrets;
 
 #[async_trait]
-impl Hunter for ServiceAccountTokenExposed {
-    fn name(&self)          -> &'static str { "ServiceAccountTokenExposed" }
+impl Hunter for ListNamespacedSecrets {
+    fn name(&self)          -> &'static str { "ListNamespacedSecrets" }
+    fn description(&self)   -> &'static str { "Lists secrets in the default namespace (anonymously or via the token)." }
+    fn mode(&self)          -> Mode         { Mode::Passive }
+    fn subscribes_to(&self) -> EventKind    { EventKind::ApiServer }
+
+    async fn execute(&self, ctx: Arc<HunterCtx>, event: Arc<Event>) -> Vec<Output> {
+        let (host, port, tls) = match event.as_ref() {
+            Event::ApiServer { host, port, tls } => (*host, *port, *tls),
+            _ => return vec![],
+        };
+        let resp = match api_get(&ctx, host, port, tls, "/api/v1/namespaces/default/secrets").await {
+            Some(r) => r,
+            None => return vec![],
+        };
+        if resp.status().is_success() {
+            let json: Value = resp.json().await.unwrap_or_default();
+            if json["kind"].as_str() == Some("SecretList") {
+                let count = json["items"].as_array().map(|a| a.len()).unwrap_or(0);
+                if count > 0 {
+                    tracing::warn!("  [!] KHV050 {} secrets in default ns at {}:{}", count, host, port);
+                    return vec![Output::Finding(Finding::khv(
+                        "KHV050", self.name(), host, Some(port),
+                        Some(format!("{count} secrets readable in the 'default' namespace")),
+                    ))];
+                }
+            }
+        }
+        vec![]
+    }
+}
+
+// ── KHV036 — Read access to the pod's service-account token ───────────────────
+
+pub struct AccessPodServiceAccountToken;
+
+#[async_trait]
+impl Hunter for AccessPodServiceAccountToken {
+    fn name(&self)          -> &'static str { "AccessPodServiceAccountToken" }
+    fn description(&self)   -> &'static str { "Reads the mounted service-account token and validates its JWT shape." }
     fn mode(&self)          -> Mode         { Mode::Passive }
     fn subscribes_to(&self) -> EventKind    { EventKind::InCluster }
 
     async fn execute(&self, _ctx: Arc<HunterCtx>, _event: Arc<Event>) -> Vec<Output> {
-        // When running in-cluster, check if the SA token is world-readable
-        match std::fs::metadata("/var/run/secrets/kubernetes.io/serviceaccount/token") {
-            Ok(meta) => {
-                // Check if the token file exists — it always does in a pod
-                // The real check is whether the token has broad permissions (probed by other hunters)
-                tracing::info!("  [*] Service account token found in-pod");
-                vec![Output::Finding(Finding {
-                    id:          "KHV036".to_string(),
-                    name:        "Read Access to Pod's Service Account Token".to_string(),
-                    description: "The pod has access to a service account token. If the \
-                                  token has cluster-admin or broad RBAC permissions, it \
-                                  can be used to access the API server.".to_string(),
-                    severity:    Severity::Medium,
-                    host:        "localhost".to_string(),
-                    port:        None,
-                    evidence:    Some(format!("Token file size: {} bytes", meta.len())),
-                    category:    "vulnerability".to_string(),
-                })]
-            }
-            Err(_) => vec![],
-        }
+        let token = match std::fs::read_to_string(SA_TOKEN_PATH) {
+            Ok(t) => t,
+            Err(_) => return vec![],
+        };
+        // Validate JWT shape only (header.payload.signature) — never verify the signature.
+        let parts = token.trim().split('.').count();
+        let looks_jwt = parts == 3;
+        tracing::info!("  [*] Service account token readable in-pod");
+        vec![Output::Finding(Finding::khv(
+            "KHV036", self.name(), "localhost", None,
+            Some(format!(
+                "Token readable at {SA_TOKEN_PATH} ({} bytes, {})",
+                token.trim().len(),
+                if looks_jwt { "valid JWT shape" } else { "non-JWT" },
+            )),
+        ))]
     }
 }

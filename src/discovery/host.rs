@@ -5,6 +5,25 @@ use serde_json::Value;
 use crate::hunter::Hunter;
 use crate::types::{Event, EventKind, HunterCtx, Mode, Output};
 
+/// Always-on host discovery. Concrete target IPs are seeded from CLI args
+/// (`--remote`/`--cidr`/`--interface`) before the run; this module is the
+/// registered upstream-parity counterpart and a hook for future expansion
+/// (e.g. interface enumeration). It is a no-op event-wise.
+pub struct HostDiscovery;
+
+#[async_trait]
+impl Hunter for HostDiscovery {
+    fn name(&self)          -> &'static str { "HostDiscovery" }
+    fn description(&self)   -> &'static str { "Generates the set of target hosts to scan." }
+    fn mode(&self)          -> Mode         { Mode::Passive }
+    fn subscribes_to(&self) -> EventKind    { EventKind::ScanStarted }
+
+    async fn execute(&self, _ctx: Arc<HunterCtx>, _event: Arc<Event>) -> Vec<Output> {
+        tracing::debug!("HostDiscovery active (targets seeded from CLI)");
+        vec![]
+    }
+}
+
 /// When running inside a pod: queries the K8s API for all node IPs and emits NewHost.
 pub struct FromPodHostDiscovery;
 

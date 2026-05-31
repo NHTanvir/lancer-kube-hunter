@@ -12,12 +12,17 @@ pub struct Runner {
 
 impl Runner {
     pub fn new(
-        mode:         Mode,
-        hunters:      Vec<Arc<dyn Hunter>>,
-        port_timeout: std::time::Duration,
-        custom_ports: Option<Vec<u16>>,
+        mode:           Mode,
+        hunters:        Vec<Arc<dyn Hunter>>,
+        port_timeout:   std::time::Duration,
+        custom_ports:   Option<Vec<u16>>,
+        sa_token:       Option<String>,
+        interface_mode: bool,
     ) -> anyhow::Result<Self> {
-        let ctx = Arc::new(HunterCtx::new(mode, port_timeout, custom_ports)?);
+        let ctx = Arc::new(
+            HunterCtx::new(mode, port_timeout, custom_ports)?
+                .with_options(sa_token, interface_mode),
+        );
         Ok(Self { hunters, ctx })
     }
 
@@ -30,10 +35,8 @@ impl Runner {
             let mut set: JoinSet<Vec<Output>> = JoinSet::new();
 
             for hunter in &self.hunters {
-                // Skip active hunters in passive mode
-                if hunter.mode() == crate::types::Mode::Active
-                    && self.ctx.mode == Mode::Passive
-                {
+                // Skip active hunters in passive mode.
+                if hunter.mode() == Mode::Active && self.ctx.mode == Mode::Passive {
                     continue;
                 }
                 if hunter.subscribes_to() != event_arc.kind() {

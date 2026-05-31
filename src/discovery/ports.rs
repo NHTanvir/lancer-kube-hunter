@@ -9,10 +9,21 @@ use tokio::task::JoinSet;
 use crate::hunter::Hunter;
 use crate::types::{Event, EventKind, HunterCtx, Mode, Output};
 
-/// K8s standard service ports to scan
+/// K8s standard service ports to scan (API server, etcd, kubelet, proxy, dashboard).
 const K8S_PORTS: &[u16] = &[
-    443, 2379, 2380, 6443, 8001, 8080, 8443, 10250, 10255,
+    443, 2379, 2380, 4443, 6443, 8001, 8080, 8443, 10250, 10255,
 ];
+
+/// NodePort service range — upstream kube-hunter sweeps 30000-32767.
+const NODEPORT_LO: u16 = 30000;
+const NODEPORT_HI: u16 = 32767;
+
+/// Build the default port set: the well-known K8s ports plus the NodePort range.
+fn default_ports() -> Vec<u16> {
+    let mut v: Vec<u16> = K8S_PORTS.to_vec();
+    v.extend(NODEPORT_LO..=NODEPORT_HI);
+    v
+}
 
 pub struct PortDiscovery;
 
@@ -28,9 +39,10 @@ impl Hunter for PortDiscovery {
             _ => return vec![],
         };
 
+        let default = default_ports();
         let ports: &[u16] = ctx.custom_ports
             .as_deref()
-            .unwrap_or(K8S_PORTS);
+            .unwrap_or(&default);
 
         scan_ports(host, ports, ctx.port_timeout).await
     }

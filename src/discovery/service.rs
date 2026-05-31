@@ -27,9 +27,31 @@ impl Hunter for ServiceDiscovery {
             10250              => probe_kubelet_secure(&ctx, host, port).await,
             10255              => probe_kubelet_readonly(&ctx, host, port).await,
             2379 | 2380        => probe_etcd(&ctx, host, port).await,
-            _                  => vec![],
+            // NodePort range and other open ports: check for an exposed Dashboard.
+            _                  => probe_dashboard(&ctx, host, port).await,
         }
     }
+}
+
+/// Detects a Kubernetes Dashboard served directly on an open port (e.g. via a
+/// NodePort) and emits a Dashboard event.
+async fn probe_dashboard(
+    ctx: &HunterCtx, host: std::net::IpAddr, port: u16,
+) -> Vec<Output> {
+    for scheme in ["https", "http"] {
+        let url = format!("{scheme}://{host}:{port}/");
+        if let Ok(r) = ctx.http_insecure.get(&url).send().await {
+            if r.status().is_success() {
+                if let Ok(body) = r.text().await {
+                    if body.contains("kubernetes-dashboard") || body.contains("Kubernetes Dashboard") {
+                        tracing::info!("  [*] Kubernetes Dashboard at {}:{}", host, port);
+                        return vec![Output::Event(Event::Dashboard { host, port })];
+                    }
+                }
+            }
+        }
+    }
+    vec![]
 }
 
 async fn probe_api_server(

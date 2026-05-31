@@ -11,27 +11,33 @@ pub fn print(findings: &[Finding]) {
 
     println!("\n{}", "=== Findings ===".bold());
 
+    let mut sorted: Vec<&Finding> = findings.iter().collect();
+    sorted.sort_by(|a, b| b.severity.rank().cmp(&a.severity.rank()));
+
     let mut table = Table::new();
     table.set_content_arrangement(ContentArrangement::Dynamic);
     table.set_header(vec![
         Cell::new("ID").add_attribute(Attribute::Bold),
+        Cell::new("CVE").add_attribute(Attribute::Bold),
         Cell::new("Severity").add_attribute(Attribute::Bold),
+        Cell::new("Category").add_attribute(Attribute::Bold),
         Cell::new("Name").add_attribute(Attribute::Bold),
-        Cell::new("Host").add_attribute(Attribute::Bold),
+        Cell::new("Location").add_attribute(Attribute::Bold),
         Cell::new("Evidence").add_attribute(Attribute::Bold),
     ]);
 
-    for f in findings {
-        let sev_cell = severity_cell(f.severity);
-        let host_str = match f.port {
+    for f in &sorted {
+        let location = match f.port {
             Some(p) => format!("{}:{}", f.host, p),
             None    => f.host.clone(),
         };
         table.add_row(vec![
-            Cell::new(&f.id),
-            sev_cell,
+            Cell::new(&f.vid),
+            Cell::new(f.cve.as_deref().unwrap_or("-")),
+            severity_cell(f.severity),
+            Cell::new(f.category.as_str()),
             Cell::new(&f.name),
-            Cell::new(&host_str),
+            Cell::new(&location),
             Cell::new(f.evidence.as_deref().unwrap_or("-")),
         ]);
     }

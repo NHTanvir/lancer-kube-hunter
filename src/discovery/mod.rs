@@ -8,6 +8,7 @@ use crate::hunter::Hunter;
 
 pub fn all_hunters() -> Vec<Arc<dyn Hunter>> {
     vec![
+        Arc::new(host::HostDiscovery),
         Arc::new(host::FromPodHostDiscovery),
         Arc::new(ports::PortDiscovery),
         Arc::new(service::ServiceDiscovery),
